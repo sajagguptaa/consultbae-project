@@ -10,6 +10,7 @@ Two views (sidebar navigation):
 
 Run locally with: streamlit run app/streamlit_app.py
 """
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,12 +22,27 @@ from db_utils import save_submission, list_submissions, db_exists
 
 st.set_page_config(page_title="ConsultBae Audio Collection", page_icon="🎙️", layout="centered")
 
+REPO_ROOT = Path(__file__).parent.parent
+
 if not db_exists():
-    st.error(
-        "db/consultbae.db doesn't exist yet. Run `python3 scripts/02_build_database.py` "
-        "from the repo root first (Task 1's pipeline), then restart this app."
-    )
-    st.stop()
+    # db/consultbae.db is a generated build artifact, deliberately not committed
+    # to git (see context.md for the reasoning). On a fresh deploy (e.g. Streamlit
+    # Cloud cloning the repo from scratch), it won't exist yet - rather than show
+    # a dead error screen, build it automatically from the raw CSVs that ARE in
+    # the repo. This runs scripts/02 and 03 exactly as documented in the README,
+    # just triggered on first load instead of requiring a manual step beforehand.
+    with st.spinner("First run — building the database from the source CSVs (Task 1 pipeline)..."):
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "02_build_database.py")],
+            capture_output=True, text=True, cwd=str(REPO_ROOT),
+        )
+        if result.returncode != 0:
+            st.error(f"Database build failed:\n```\n{result.stderr}\n```")
+            st.stop()
+        subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "03_add_skill_category_column.py")],
+            capture_output=True, text=True, cwd=str(REPO_ROOT),
+        )
 
 st.sidebar.title("🎙️ ConsultBae Audio")
 page = st.sidebar.radio("View", ["Submit Recording", "All Submissions"])
