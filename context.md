@@ -18,6 +18,18 @@ Job application assignment with 5 tasks, 3 messy CSV files from 3 different syst
 
 We agreed on this build order and it's important to keep following it: **Task 1 → Task 4 → Task 3 → Task 2 → Task 5 → final polish**. Task 3 before Task 2 was deliberate — the n8n automation in Task 2 should hook into something real (the audio app / database) rather than being a standalone demo.
 
+## Git & AI workflow — read this before making any more commits
+
+The commits so far were made inside an AI-assisted sandbox session, all within a short window — the messages are accurate and each represents one real decision, but the timestamps don't reflect genuine day-by-day progress. **Do not try to fix this by rewriting history** (`git commit --amend --date=...`, `filter-branch`, rebasing with fake `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE`, etc.) — that's fabricating evidence on a job application, not a workflow improvement. The existing history is fine to keep as-is; if it comes up, "built with AI assistance, see the stuck log for the actual decision points" is a normal thing to say, and the assignment itself asks what you asked AI, so this is expected here, not something to hide.
+
+Going forward — whether you're driving an AI coding assistant (Claude Code, Cursor, etc.) yourself or handing this file to one to work from — follow these rules so the *future* history actually earns its keep:
+
+1. **Commit per logical unit of work, not one batch at the end of a session.** Look at the 5 commits already in this repo as the pattern to match: raw data as its own commit, the matching pipeline as its own commit, the bug fix as a *separate* commit from the pipeline it fixes (don't squash a fix into the commit that introduced the bug — the fix being visible as its own step is exactly what makes a stuck-log story checkable), the report separately again. If an AI tool defaults to dumping everything into one commit at the end, explicitly instruct it not to.
+2. **Commit messages explain the "why," not just the "what."** `git log --oneline` should read as a decision trail a reviewer can follow without opening every diff. "Fix match_method mislabeling: track fallback merges explicitly instead of inferring from aggregate email/phone sets" is the bar — not "fix bug" or "update script."
+3. **Let timestamps happen naturally.** No trick needed here — if work on Task 3 happens today and Task 2 happens two days from now, the commits will land on different days on their own. The only failure mode to avoid is doing everything in one sitting and then wishing it looked spread out.
+4. **Push to GitHub regularly, not just once at the end.** Local AI coding tools commit to your real local `.git`, so the "sandbox disappears" problem from earlier doesn't apply once this is running on an actual machine — but still push often rather than batching, so nothing is ever sitting unpushed for long.
+5. **Before starting a new task (2, 3, or 5), re-read this context.md in full — especially the stuck log in README.md — rather than starting fresh from a code skim.** An AI assistant picking this up mid-way should treat this file as the source of truth for *decisions already made*, not just re-derive an approach from reading the code, since some of those decisions (like the Tier-3 conflict rule) aren't obvious from the code alone without knowing what was tried and rejected first.
+
 ## Repo location & structure
 
 Working locally at `consultbae-merge/` (this needs to be pushed to an actual GitHub repo — that hasn't happened yet, everything so far is local commits only).
