@@ -38,50 +38,23 @@ import pandas as pd
 import sqlite3
 import re
 import json
+import sys
 from pathlib import Path
 from datetime import datetime
 from difflib import SequenceMatcher
+
+sys.path.insert(0, str(Path(__file__).parent))
+from common import norm_city, norm_email, norm_phone, norm_name_key, CITY_ALIASES
 
 BASE = Path(__file__).parent.parent
 RAW = BASE / "data" / "raw"
 DB_PATH = BASE / "db" / "consultbae.db"
 
 # ---------------------------------------------------------------------------
-# Normalization helpers
+# Normalization helpers now live in scripts/common.py (norm_city, norm_email,
+# norm_phone, norm_name_key, CITY_ALIASES) - shared with the Task 3 audio app
+# so both entry points match against the `people` table using identical rules.
 # ---------------------------------------------------------------------------
-
-CITY_ALIASES = {
-    "bangalore": "Bengaluru", "bengaluru": "Bengaluru",
-    "gurgaon": "Gurugram", "gurugram": "Gurugram",
-    "noida": "Noida",
-    "pune": "Pune",
-    "delhi": "Delhi", "new delhi": "Delhi",
-    "delhi ncr": "Delhi NCR",  # kept distinct - it's a region, not a specific city, see data issues report
-}
-
-def norm_city(c):
-    if pd.isna(c):
-        return None
-    key = str(c).strip().lower()
-    return CITY_ALIASES.get(key, str(c).strip().title())
-
-def norm_email(e):
-    if pd.isna(e) or "@" not in str(e):
-        return None
-    return str(e).strip().lower()
-
-def norm_phone(p):
-    if pd.isna(p):
-        return None
-    digits = re.sub(r"\D", "", str(p))
-    if len(digits) < 10:
-        return None
-    return digits[-10:]  # last 10 digits = canonical Indian mobile number, strips 0/91/+91 prefixes
-
-def norm_name_key(n):
-    if pd.isna(n):
-        return None
-    return re.sub(r"\s+", " ", str(n).strip().lower().replace(".", ""))
 
 def name_similarity(a, b):
     if not a or not b:
