@@ -16,7 +16,7 @@
 - `db/consultbae.db` — the merged database (generated; safe to delete and re-run, the script is idempotent)
 - `requirements.txt`, `packages.txt` — Python deps + system deps (ffmpeg, for Streamlit Cloud deployment)
 
-Task 5 (scaling write-up) is still pending.
+All 5 tasks are now complete — see README sections below for each.
 
 ## Setup
 
@@ -132,6 +132,31 @@ Result: 102 raw rows → **55 unique people**, with full row-level lineage kept 
 **Verification approach:** rather than hand-author the JSON and assume it's correct, I actually installed n8n locally, imported this exact workflow via its CLI, and ran it end-to-end against the real merged database — first with a local mock standing in for the Claude API call (to validate the wiring without spending real API credits), confirming all 55 people got correctly tagged with a sensible category distribution before ever touching the real Anthropic endpoint. This caught a real, non-obvious bug — see stuck log entry #6.
 
 **One-time setup required** (can't be exported in the JSON, and shouldn't be — it's a secret): after importing, the "Classify Skill Category (Claude)" node needs a Header Auth credential named `x-api-key` with your own Anthropic API key as the value. Exact steps are in the Setup section above.
+
+## Task 5 — Scaling stretch: what happens at 5,000 gig workers in a weekend
+
+*One page, no code — what breaks and what I'd change before a real launch, grounded in the actual implementation above rather than generic scaling advice.*
+
+### What breaks first
+
+**1. Local disk storage for audio files — breaks almost immediately on most free hosts.** `uploads/audio/` writes to local disk. Render's and Streamlit Cloud's free tiers use ephemeral filesystems — any redeploy, restart, or scale-to-zero event wipes every submitted recording. At 5,000 submissions this isn't a capacity problem, it's a certainty problem: the files *will* disappear, not might.
+
+**2. SQLite write contention.** SQLite allows one writer at a time; concurrent writers queue and, past a short timeout, fail outright. Sustained submissions from a genuinely large weekend spike (launch announcements tend to cluster traffic in bursts, not spread evenly across 48 hours) will produce `database is locked` errors under real concurrent load — this isn't hypothetical, it's a documented SQLite behavior under concurrent writers.
+
+**3. The Flask dev server can't handle concurrent requests properly.** `app/db_api.py` runs on Flask's built-in development server, which prints its own warning about this on startup ("do not use in production") — it's essentially single-threaded and will queue or drop requests under real concurrent load from n8n and the audio app hitting it at once.
+
+**4. Synchronous audio processing blocks the request.** `analyze_audio()` runs inline during the Streamlit submit action — decoding via ffmpeg and computing the noise estimate happens before the user sees a response. Fine for a demo with one user; at scale, submissions queue behind each other and the app feels like it's hanging, especially for longer recordings.
+
+**5. A real race condition in person-matching.** `app/db_utils.py`'s `find_or_create_person()` is a check-then-insert: SELECT to look for an existing phone match, then INSERT if none found. Nothing stops two near-simultaneous submissions from the same new phone number (a double-tap, a retry after a slow response, or a genuine coincidence at 5,000 people) from both passing the "not found" check and creating two separate person records for what should be one person — undoing exactly the kind of duplicate-person problem Task 1 was built to solve in the first place.
+
+### What I'd change before launch
+
+- **Storage:** move audio files to S3 (or GCS/R2) immediately — not as a later optimization, as a prerequisite. Store the object key in `audio_submissions.file_path` instead of a local path.
+- **Database:** migrate from SQLite to Postgres. This directly fixes the write-contention problem (real concurrent writers, not single-writer locking) and lets the phone-matching race condition be closed properly with a `UNIQUE` constraint on `people.primary_phone` plus an `ON CONFLICT` upsert, instead of the current check-then-insert pattern.
+- **Uploads/failures:** decouple the upload from the processing. Accept the file and return success immediately, push the actual `analyze_audio()` work onto a background queue (Celery+Redis, or even a simple SQS-backed worker), and update the submission record asynchronously once extraction finishes. This also gives a natural place to retry failed extractions instead of the current single-attempt `st.error()` and a dead end.
+- **Duplicates:** decide the actual business rule (is a second submission from the same phone a correction, a retry, or spam?) and enforce it explicitly — right now there's no submission-level dedup at all, only person-level matching. A simple idempotency key (client-generated, sent with the submission) would catch accidental double-submits from network retries, which is the most likely real-world case.
+- **Cost:** rough shape of it — S3 storage for 5,000 short recordings (~1-2MB each) is a few dollars a month, genuinely not the concern. The real cost risk is egress/bandwidth if the "All Submissions" play-button view gets used heavily (every playback re-downloads the file), and compute cost if audio processing moves to always-on background workers rather than scaling to zero between bursts.
+- **One thing I'd explicitly *not* over-engineer for a weekend launch:** full autoscaling infrastructure. 5,000 submissions over 48 hours is a real but modest load (roughly 100/hour on average, more concentrated around a launch announcement) — Postgres + S3 + a single background worker process handles this comfortably. The failure modes above are about correctness and durability (don't lose data, don't create duplicate people, don't silently drop writes), not about needing a large distributed system.
 
 ## Stuck Log
 
