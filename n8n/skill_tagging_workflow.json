@@ -1,0 +1,95 @@
+{
+  "id": "skilltag1",
+  "name": "ConsultBae - Skill Category Auto-Tagging",
+  "active": false,
+  "settings": {},
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger1",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "http://localhost:8787/api/people/untagged",
+        "options": {}
+      },
+      "id": "http1",
+      "name": "Get Untagged People",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "notes": "Hits the Flask API bridge (app/db_api.py) - must be running on localhost:8787. n8n has no built-in SQLite node, this is the portable alternative. Response is a JSON array; n8n auto-splits it into one item per person (verified empirically, no Split Out node needed)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "anthropic-version", "value": "2023-06-01"},
+            {"name": "content-type", "value": "application/json"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: \"claude-sonnet-4-6\", max_tokens: 20, system: \"You classify a person's skill set into exactly one category: automation-heavy, web dev, data, voice/calling, or other. Respond with ONLY the category label, nothing else - no punctuation, no explanation.\", messages: [{ role: \"user\", content: \"Skills: \" + $json.skills_text }] }) }}",
+        "options": {}
+      },
+      "id": "http2",
+      "name": "Classify Skill Category (Claude)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0],
+      "notes": "REQUIRES SETUP: after importing, open this node -> Authentication -> Header Auth -> create a new credential named 'x-api-key' with your real Anthropic API key as the value. See README for exact steps."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const category = ($input.item.json.content[0].text || '').trim().toLowerCase();\nconst allowed = ['automation-heavy', 'web dev', 'data', 'voice/calling', 'other'];\nreturn {\n  json: {\n    person_id: $('Get Untagged People').item.json.person_id,\n    canonical_name: $('Get Untagged People').item.json.canonical_name,\n    skill_category: allowed.includes(category) ? category : 'other'\n  }\n};"
+      },
+      "id": "code1",
+      "name": "Parse & Validate Category",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0],
+      "notes": "mode is explicitly 'runOnceForEachItem' - the default mode ('runOnceForAllItems') silently drops every item except the first when the code returns a single object instead of an array. Caught this during testing: only 1/55 people got tagged before this fix. See stuck log."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://localhost:8787/api/people/{{ $json.person_id }}/tag",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ skill_category: $json.skill_category }) }}",
+        "options": {}
+      },
+      "id": "http3",
+      "name": "Write Back Tag",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 0]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{"node": "Get Untagged People", "type": "main", "index": 0}]]
+    },
+    "Get Untagged People": {
+      "main": [[{"node": "Classify Skill Category (Claude)", "type": "main", "index": 0}]]
+    },
+    "Classify Skill Category (Claude)": {
+      "main": [[{"node": "Parse & Validate Category", "type": "main", "index": 0}]]
+    },
+    "Parse & Validate Category": {
+      "main": [[{"node": "Write Back Tag", "type": "main", "index": 0}]]
+    }
+  }
+}

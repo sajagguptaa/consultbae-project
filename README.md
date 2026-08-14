@@ -9,11 +9,14 @@
 - `app/streamlit_app.py` — Task 3 audio collection app (submit view + all-submissions view)
 - `app/audio_utils.py` — audio feature extraction (duration, sample rate, bitrate, loudness, noise estimate)
 - `app/db_utils.py` — links audio submissions to the Task 1 database via phone matching
+- `app/db_api.py` — Flask API bridge for Task 2 (n8n has no built-in SQLite node, so this exposes the DB over HTTP)
+- `scripts/03_add_skill_category_column.py` — idempotent migration adding the column Task 2 writes into
+- `n8n/skill_tagging_workflow.json` — the Task 2 automation, verified by actually running it end-to-end (not just hand-authored)
 - `tests/test_audio_utils.py` — regression tests for the audio extraction logic
 - `db/consultbae.db` — the merged database (generated; safe to delete and re-run, the script is idempotent)
 - `requirements.txt`, `packages.txt` — Python deps + system deps (ffmpeg, for Streamlit Cloud deployment)
 
-Task 2 (n8n automation) and Task 5 (scaling write-up) are still pending.
+Task 5 (scaling write-up) is still pending.
 
 ## Setup
 
@@ -24,12 +27,22 @@ pip install -r requirements.txt
 
 python3 scripts/01_profile.py      # prints the raw data quality findings
 python3 scripts/02_build_database.py   # builds db/consultbae.db
+python3 scripts/03_add_skill_category_column.py   # adds the column Task 2 writes into
 
 # Task 3 - audio app (needs db/consultbae.db built first)
 streamlit run app/streamlit_app.py
+
+# Task 2 - n8n automation (needs db/consultbae.db built first)
+python3 app/db_api.py              # starts the API bridge on localhost:8787, leave running
+n8n import:workflow --input=n8n/skill_tagging_workflow.json
+n8n start                          # then open the n8n editor UI and see setup steps below
 ```
 
-No API keys or external services needed. The audio app needs `ffmpeg` installed on the system (already present on most Linux/Mac setups — check with `ffmpeg -version`; on Streamlit Cloud, `packages.txt` in this repo handles it automatically).
+**Task 2 one-time setup after importing:** open the "Classify Skill Category (Claude)" node in the n8n editor → Authentication → Header Auth → create a new credential named `x-api-key` with your real Anthropic API key as the value → save. Then run the workflow from the editor (click "Execute workflow" on the Manual Trigger). `app/db_api.py` must be running in a separate terminal the whole time — n8n calls it over HTTP.
+
+No API keys or external services needed for Tasks 1/3. Task 2 needs your own Anthropic API key (added as an n8n credential, never committed to this repo).
+
+The audio app needs `ffmpeg` installed on the system (already present on most Linux/Mac setups — check with `ffmpeg -version`; on Streamlit Cloud, `packages.txt` in this repo handles it automatically).
 
 **Known gotcha on Python 3.13+:** Python 3.13 removed the stdlib `audioop` module, which `pydub` depends on internally. If you see `ModuleNotFoundError: No module named 'audioop'` (or `'pyaudioop'`), it means you're on 3.13+ — run `pip install audioop-lts` to fix it (this is already in `requirements.txt` as a conditional dependency for Python ≥3.13, so a fresh `pip install -r requirements.txt` should handle it automatically, but is worth knowing if it doesn't for some reason — e.g. a stale/cached venv from before this was added).
 
@@ -108,6 +121,18 @@ Result: 102 raw rows → **55 unique people**, with full row-level lineage kept 
 
 **Testing approach:** rather than only testing by clicking through the browser UI, the audio extraction logic (`app/audio_utils.py`) has its own test suite (`tests/test_audio_utils.py`) using synthetically generated WAV signals — a speech-shaped signal (tone bursts + silence gaps, to actually resemble real speech) at three noise levels, plus silence and format-conversion edge cases. This is what caught the bug described below before it ever reached a real recording.
 
+## Task 2 — n8n automation approach
+
+**What it does:** an n8n workflow (`n8n/skill_tagging_workflow.json`) that reads every person in the database who has skills data but no `skill_category` yet, sends their skills to Claude for classification into one of `automation-heavy` / `web dev` / `data` / `voice/calling` / `other`, and writes the result back — end to end, no manual step in between.
+
+**Why an API bridge instead of a direct DB connection:** confirmed via research before building anything — n8n has **no built-in SQLite node** (there's an open community forum thread asking why not, still unanswered). The only options are unofficial community node packages that would need separate installation on whoever's n8n instance runs this, which is fragile for a reviewer who just wants to open this and have it work. Built a tiny Flask API (`app/db_api.py`) instead, and n8n talks to it with its core HTTP Request node — zero extra n8n setup required, and honestly this is also just how this would actually be built for a real client integration (no-code tools talk to backends over HTTP in practice, not by reaching into a database file directly).
+
+**Workflow structure:** Manual Trigger → `GET /api/people/untagged` → (n8n auto-splits the JSON array response into one item per person — verified empirically, no separate Split Out node needed) → `POST` to Claude for classification → Code node parses/validates the response → `POST /api/people/{id}/tag` writes it back.
+
+**Verification approach:** rather than hand-author the JSON and assume it's correct, I actually installed n8n locally, imported this exact workflow via its CLI, and ran it end-to-end against the real merged database — first with a local mock standing in for the Claude API call (to validate the wiring without spending real API credits), confirming all 55 people got correctly tagged with a sensible category distribution before ever touching the real Anthropic endpoint. This caught a real, non-obvious bug — see stuck log entry #6.
+
+**One-time setup required** (can't be exported in the JSON, and shouldn't be — it's a secret): after importing, the "Classify Skill Category (Claude)" node needs a Header Auth credential named `x-api-key` with your own Anthropic API key as the value. Exact steps are in the Setup section above.
+
 ## Stuck Log
 
 **These are written honestly, including where the first version of the code was wrong** — the assignment specifically says generic stuck logs score zero, so here's exactly what happened, including the part where the AI-assisted first pass had a real bug.
@@ -139,3 +164,13 @@ I'd flagged this exact risk in the README and context.md while still developing 
 I didn't guess at a fix (pinning an older pydub version was my first instinct, but that risks losing compatibility/bugfixes for no real reason). I asked Claude to look into it, and it searched rather than answering from memory — worth calling out, since a wrong guess here would've cost real debugging time. It turned up that Python 3.13 removed the `audioop` stdlib module entirely (PEP 594), that pydub's own fallback to `pyaudioop` doesn't actually work either (no such package is published under that exact name), and that the real fix is a separate backport package called `audioop-lts`, maintained specifically to plug this gap and installable as a drop-in replacement (it registers itself importable as `audioop`, so pydub's original `import audioop` line just works once it's installed). One command — `pip install audioop-lts` — fixed it immediately.
 
 Rather than leave this as a one-off local fix, added it to `requirements.txt` as `audioop-lts>=0.2; python_version >= "3.13"` — a conditional dependency using pip's environment markers, so it only installs where it's actually needed (3.13+) and doesn't affect the 3.12 dev environment. Also documented it explicitly as a known gotcha in the README setup steps, since the next person hitting this exact traceback shouldn't have to go through the same search — the fix should just already be sitting in the requirements file by the time they run `pip install -r requirements.txt`.
+
+### 6. An n8n workflow reported "success" while silently only processing 1 of 55 people
+
+For Task 2, I didn't want to hand-author the workflow JSON and just hope the node types and parameters were right — so I actually installed n8n locally and ran the real workflow against the real database (with a local mock standing in for the Claude API call, to test the wiring without spending real API credits). The CLI reported `"status": "success", "finished": true` with no errors. I could have stopped there and called it verified.
+
+Instead I checked the actual database afterward — the thing the workflow was supposed to change — and found only **1 of 55 people** had been tagged, not all of them. "Success" and "correct" turned out to be different things: the workflow ran without throwing an error, but it wasn't doing what it was supposed to do.
+
+The cause: n8n's Code node has two execution modes — "Run Once for All Items" (the default) and "Run Once for Each Item." I'd written the code assuming per-item context (`$input.item`, returning a single object), which is only correct in the second mode. In the default mode, returning a single object instead of an array of objects silently discards every item except the first — no warning, no error, nothing in the execution log to suggest data was lost. I rejected the idea of just wrapping my existing code in a loop inside the "all items" mode as a patch, since that would leave the underlying mode mismatch in place for anyone editing this workflow later without knowing the gotcha existed. Instead set the node's mode explicitly to `runOnceForEachItem`, matching what the code actually assumes, re-ran the same test, and confirmed via the database (not the CLI's "success" message) that all 55 people were now tagged with a sensible spread across categories.
+
+The broader lesson I took from this, worth stating plainly: **a tool reporting success only tells you it didn't crash — it doesn't tell you it did the right thing.** The only way to actually know is to check the state that was supposed to change. This is the second time in this project a "looks correct" first pass turned out to be silently wrong (the first was the merge pipeline's transitive-merge bug) — different bugs, same root cause: trusting an execution summary instead of the actual output.
