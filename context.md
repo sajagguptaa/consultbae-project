@@ -32,13 +32,14 @@ Going forward — whether you're driving an AI coding assistant (Claude Code, Cu
 
 ## Repo location & structure
 
-Working locally at `consultbae-merge/` (this needs to be pushed to an actual GitHub repo — that hasn't happened yet, everything so far is local commits only).
+Working locally at `consultbae-merge/` (this needs to be pushed to an actual GitHub repo — that hasn't happened yet, everything so far is local commits only. See the Git & AI workflow section above for how to push it once you have the files locally).
 
 ```
 consultbae-merge/
 ├── .gitignore
-├── README.md                          # setup steps + Task 1 approach + full Task 4 report + stuck log
-├── requirements.txt                   # currently just: pandas>=2.0  (NEEDS streamlit, pydub, numpy added — see Next Steps)
+├── README.md                          # setup steps + Task 1 approach + Task 3 approach + full Task 4 report + stuck log (4 entries)
+├── requirements.txt                   # pandas, streamlit, pydub, numpy, pytest
+├── packages.txt                       # ffmpeg (system dep, needed for Streamlit Cloud deployment)
 ├── data/raw/                          # the 3 original CSVs, untouched
 │   ├── source1_naukri_applicants.csv
 │   ├── source2_gig_workers.csv
@@ -46,9 +47,16 @@ consultbae-merge/
 ├── scripts/
 │   ├── 01_profile.py                  # profiles raw files, prints issues found (read-only, no writes)
 │   ├── 02_build_database.py           # THE core Task 1 pipeline — normalizes, matches, builds db/consultbae.db
-│   └── common.py                      # NEW, uncommitted — shared normalize_phone/email/city helpers (see below)
+│   └── common.py                      # shared normalize_phone/email/city helpers, used by both Task 1 pipeline and Task 3 app
+├── app/
+│   ├── streamlit_app.py               # Task 3 UI — Submit Recording view + All Submissions view
+│   ├── audio_utils.py                 # audio feature extraction (duration/sample rate/bitrate/loudness/noise estimate)
+│   └── db_utils.py                    # matches submissions to Task 1's people table via phone number
+├── tests/
+│   └── test_audio_utils.py            # 5 passing regression tests for the extraction logic
+├── uploads/audio/                     # gitignored — where submitted audio files actually get saved
 └── db/
-    ├── consultbae.db                  # generated SQLite output (untracked in git so far — decide whether to commit or gitignore)
+    ├── consultbae.db                  # generated SQLite output (untracked in git — see decision below)
     └── merged_people_full_export.csv  # generated flat export for manual review
 ```
 
@@ -56,17 +64,24 @@ consultbae-merge/
 
 Current commits (all local, not pushed anywhere yet):
 ```
+2b0af31 Update README: Task 3 setup steps + approach writeup, stuck log entry #4, repo structure listing
+ec68b44 Add Streamlit UI for Task 3
+09ff6d1 Add database integration layer for audio app (Task 3 pt.2)
+f86c005 Add audio feature extraction module + tests (Task 3 pt.1)
+899e6ab Extract shared normalization helpers into common.py for reuse in audio app
+4d5a3f1 Add Git & AI workflow guidance to context.md for future commits
+4a48c76 Add context.md handoff doc for developer transition
 cd8849a Add README with setup steps, Task 1 approach, data issues report (Task 4), and stuck log
-f65c7cd Fix match_method mislabeling: track fallback merges explicitly instead of inferring from aggregate email/phone sets
-4537869 Add profiling script + entity-resolution merge pipeline (union-find, tiered email/phone/name-city matching)
-c54e3ef Add raw source CSVs (source1: naukri, source2: gig_workers, source3: cbnexus)
+f65c7cd Fix match_method mislabeling
+4537869 Add profiling script + entity-resolution merge pipeline
+c54e3ef Add raw source CSVs
 ```
+(run `git log --oneline` yourself for the authoritative current list — this file will drift out of date as more commits land)
 
-**Uncommitted / in-progress right now:**
-- `scripts/common.py` — just created, NOT yet committed, and NOT yet wired up. It extracts `norm_phone`, `norm_email`, `norm_city`, `norm_name_key`, and `CITY_ALIASES` out of `02_build_database.py` so the same normalization logic can be reused by the Streamlit audio app (Task 3 needs to match submitted phone numbers against the same `people` table using identical rules — duplicating the logic would risk drift).
-- `db/` folder — currently untracked. Decide and document whether to commit the generated `.db` file (convenient for reviewers to open directly) or gitignore it and rely on the build script (cleaner, but reviewer has to run the pipeline first). Either is defensible — just pick one and note the reasoning in the README, since "why" decisions are what this assignment is grading.
+**Uncommitted / undecided right now:**
+- `db/` folder — still untracked. Decide and document whether to commit the generated `.db` file (convenient for reviewers to open directly) or gitignore it and rely on the build script (cleaner, but reviewer has to run the pipeline first). Either is defensible — just pick one and note the reasoning in the README.
 
-**Immediate next action:** finish the refactor — replace the inline `norm_email`/`norm_phone`/`norm_city`/`norm_name_key`/`CITY_ALIASES` definitions near the top of `02_build_database.py` with `from common import ...`, re-run the pipeline to confirm identical output (55 people, same match_method labels), then commit both files together as one logical change (e.g. "Extract shared normalization helpers into common.py for reuse in audio app").
+**Immediate next action:** start Task 2 (n8n automation) — see below.
 
 ## Task 1 — what was built and why (done, committed)
 
@@ -101,31 +116,30 @@ Full detail is in `README.md` under "Data Issues Report (Task 4)" — don't summ
 
 3 honest entries already written: (1) designing a matching strategy with no common ID, (2) the transitive-merge bug described above — including that this was caught by manually checking real output rather than trusting a summary count, (3) a design-philosophy point about flagging ambiguity rather than silently guessing (applies to both the date-parsing ambiguity and the Arjun Mehta case). **Do not overwrite these** — they're written honestly including a real mistake, which is exactly what the assignment is grading for ("blank or generic stuck logs score zero"). Any new stuck points from Task 2/3/5 should be *added* to this section, not replace it.
 
-## Task 3 — audio app (IN PROGRESS, this is where to resume)
+## Task 3 — audio app (DONE, committed)
 
-**Decisions already locked in** (confirmed with the person building this, don't re-ask):
-- **Stack: Streamlit** (chosen for speed over Flask)
-- **Audio input: BOTH** browser recording and file upload (not just one)
+Built and verified end to end. Stack: **Streamlit + pydub/ffmpeg + numpy**, both browser recording (`st.audio_input`) and file upload (`st.file_uploader`) supported as required.
 
-**Plan discussed but not yet built:**
-- Use Streamlit's native `st.audio_input()` widget for browser mic recording (available in modern Streamlit — always returns WAV bytes, no custom JS component needed) and `st.file_uploader()` for uploads (accept wav/mp3/m4a/ogg/flac).
-- Environment check already done: **ffmpeg is available** at `/usr/bin/ffmpeg` in the dev sandbox, and Python is 3.12.3 — so `pydub` (which shells out to ffmpeg) will handle any uploaded format cleanly, not just WAV. If deploying to Streamlit Cloud, remember to add a `packages.txt` file containing `ffmpeg` (Streamlit Cloud needs that to install system-level ffmpeg — pip alone won't do it).
-- **Audio feature extraction plan** (not yet coded):
-  - `duration_sec`, `sample_rate_hz`, `channels` — straight from `pydub.AudioSegment` (`len(seg)/1000`, `seg.frame_rate`)
-  - `loudness_db` — from `seg.dBFS` (pydub's built-in loudness-relative-to-full-scale measure). **Watch out**: `dBFS` returns `-inf` for pure silence — needs explicit handling (e.g. `math.isinf()` check) rather than storing `-inf` directly in SQLite.
-  - `bitrate_kbps` — deliberately computed as **effective bitrate** = `(file_size_bytes * 8) / duration_sec / 1000`, NOT the encoder's nominal bitrate metadata. Reasoning already decided: this works uniformly across compressed and uncompressed formats without needing format-specific metadata parsing (e.g. via `mutagen`), and is defensible as "how many bits per second this file actually occupies." Worth stating this reasoning explicitly in the README when this section gets written, since it's a judgment call an interviewer could reasonably question.
-  - **Bonus noise/quality estimate** — planned approach: downmix to mono via `seg.get_array_of_samples()` → numpy array, compute short-time RMS envelope in ~50ms frames, take the 10th percentile as an approximate noise floor and 90th percentile as approximate signal level, compute `20*log10(signal/noise)` as an approximate SNR in dB, then bucket into "Clean" (>30dB) / "Some background noise" (15-30dB) / "Noisy" (<15dB). This is a deliberately simple, explainable heuristic — not a proper perceptual loudness/noise model — and that tradeoff (simplicity/explainability vs. accuracy) is worth being able to defend in the interview.
-- **Database integration** (the part that makes this "Task 3" and not just a standalone toy app): on submit, normalize the entered phone number using the **same** `norm_phone()` from `scripts/common.py` (hence the refactor happening right now), look up whether it matches an existing `people.primary_phone`. If yes, link the new `audio_submissions` row to that existing `person_id`. If no, insert a new `people` row with `matched_sources='audio_app'`. This reuses Task 1's matching logic instead of treating the audio app as a disconnected feature.
-- **Second view** ("all submissions" list): query `audio_submissions` joined to `people`, show name/phone/duration/sample rate/bitrate/loudness/noise estimate per row, with `st.audio()` as the play button (it accepts raw bytes or a file path directly).
+**Files added:**
+- `app/streamlit_app.py` — the UI (two views: Submit Recording, All Submissions)
+- `app/audio_utils.py` — extraction logic (duration, sample rate, bitrate, loudness, noise estimate)
+- `app/db_utils.py` — links submissions to the Task 1 `people` table via `norm_phone()` from `scripts/common.py`
+- `tests/test_audio_utils.py` — 5 passing regression tests
+- `packages.txt` — added for Streamlit Cloud deployment (`ffmpeg` system dependency)
+- `requirements.txt` — updated with `streamlit`, `pydub`, `numpy`, `pytest`
 
-**Not yet done at all:**
-- No `app/` folder or `streamlit_app.py` file exists yet.
-- `requirements.txt` still only has `pandas` — needs `streamlit`, `pydub`, `numpy` added.
-- No `packages.txt` (needed for ffmpeg on Streamlit Cloud deployment) yet.
-- Audio storage location not yet decided in code (plan: save files under `uploads/audio/`, which is already gitignored — path referenced in `audio_submissions.file_path`).
-- No testing done yet — recommend testing the extraction function against a synthetically generated WAV (e.g. a sine wave via numpy) before relying on real mic input, since mic recording can't be tested headlessly in a sandboxed dev environment.
+**Key decisions already made (don't re-derive, just read `README.md`'s Task 3 section for full detail):**
+- Bitrate is computed as *effective bitrate* (file size / duration), not parsed encoder metadata — deliberate, documented tradeoff, validated against a known 128kbps mp3 (came back 132.6kbps, close enough to trust).
+- Loudness is dBFS via `pydub`'s `.dBFS`; `-inf` (silence) is explicitly caught and stored as `NULL`, not a raw float.
+- Noise estimate is a short-time RMS percentile heuristic (10th percentile ≈ noise floor, 90th ≈ signal, ratio in dB ≈ SNR), bucketed into Clean/Some noise/Noisy. **A real bug was caught testing this** — see README stuck log entry #4 before touching this function again. Short version: it only works on signals with natural quiet/loud variation (like real speech with pauses); a continuous tone breaks it, and that's now a documented, tested limitation, not a hidden one.
+- On submit, phone number is normalized and matched against `people.primary_phone`. Match → links to existing `person_id`. No match → creates a new person with `matched_sources='audio_app'`. Verified both paths against the real DB (existing: Tanvi Gupta → person_id 1; new: Rakesh Kumar → person_id 56).
+- Audio files save to `uploads/audio/` (gitignored — don't commit real recordings).
 
-## Task 2 — n8n automation (NOT STARTED)
+**Known risk worth flagging to whoever deploys this:** `pydub` depends on the stdlib `audioop` module, which is deprecated in Python 3.12 (current dev environment) and **removed entirely in Python 3.13**. If deployment lands on Python 3.13+, this will break outright and need a pydub alternative (or a maintained fork) — check the Python version on whatever's deploying this before assuming it'll just work.
+
+**Verified before moving on:** full pipeline re-run (`02_build_database.py`) still gives 55 people with `audio_submissions` empty/clean after test data was cleared; `pytest tests/test_audio_utils.py` passes 5/5; Streamlit app boots headlessly with HTTP 200 and no import errors (UI itself wasn't clicked through in a real browser in this session — worth doing an actual manual click-through pass before recording the video).
+
+## Task 2 — n8n automation (NOT STARTED, this is where to resume)
 
 Plan discussed: lean toward the **LLM auto-tagging flow** (n8n → reads a person's `skills`/`skill_tags` field from the database → Claude API call to classify into a skill category like "automation-heavy" / "web dev" / "data" → writes the tag back to the database) rather than the duplicate-alert flow, since it better showcases real automation-stack experience. Not yet built. Should be built **after** Task 3 so it has a real audio-app-fed database to connect to. Remember: **pure-code solutions score zero here** — must actually be built in n8n (or Make/Zapier) and the flow JSON exported into the repo, with the run shown in the video.
 
