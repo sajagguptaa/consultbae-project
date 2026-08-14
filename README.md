@@ -5,9 +5,15 @@
 - `data/raw/` — the 3 original source CSVs, untouched
 - `scripts/01_profile.py` — profiles all 3 files and prints every data quality issue found, before any cleaning happens
 - `scripts/02_build_database.py` — normalizes, resolves duplicate people across sources, and builds `db/consultbae.db` (SQLite)
+- `scripts/common.py` — shared normalization helpers (phone/email/city), used by both the merge pipeline and the audio app so matching logic never drifts out of sync between them
+- `app/streamlit_app.py` — Task 3 audio collection app (submit view + all-submissions view)
+- `app/audio_utils.py` — audio feature extraction (duration, sample rate, bitrate, loudness, noise estimate)
+- `app/db_utils.py` — links audio submissions to the Task 1 database via phone matching
+- `tests/test_audio_utils.py` — regression tests for the audio extraction logic
 - `db/consultbae.db` — the merged database (generated; safe to delete and re-run, the script is idempotent)
+- `requirements.txt`, `packages.txt` — Python deps + system deps (ffmpeg, for Streamlit Cloud deployment)
 
-Tasks 2 (n8n automation), 3 (audio app), and 5 (scaling write-up) are in progress and will be added to this README as they're built.
+Task 2 (n8n automation) and Task 5 (scaling write-up) are still pending.
 
 ## Setup
 
@@ -18,9 +24,14 @@ pip install -r requirements.txt
 
 python3 scripts/01_profile.py      # prints the raw data quality findings
 python3 scripts/02_build_database.py   # builds db/consultbae.db
+
+# Task 3 - audio app (needs db/consultbae.db built first)
+streamlit run app/streamlit_app.py
 ```
 
-No API keys or external services needed for Task 1 — everything runs locally against the 3 CSVs.
+No API keys or external services needed. The audio app needs `ffmpeg` installed on the system (already present on most Linux/Mac setups — check with `ffmpeg -version`; on Streamlit Cloud, `packages.txt` in this repo handles it automatically).
+
+To run the audio extraction tests: `python3 -m pytest tests/test_audio_utils.py -v`
 
 ## Task 1 — Merge approach (short version)
 
@@ -79,6 +90,22 @@ Result: 102 raw rows → **55 unique people**, with full row-level lineage kept 
 | 19 | **No single ID field common to all 3 files** | email links source1↔source2, phone links source1↔source3, but source2↔source3-only people (e.g. Manish Bhatia, Divya Chopra, Karan Chopra, Vikram Mehta) have *no* directly shared field | Name + city fallback matching, with the conflict-safety rule described above |
 | 20 | **A person who exists in only 1 of the 3 sources but shares a name with someone else in the dataset** — "Deepak Nair" in source2 (`deepak.nair57@example.in`, New Delhi) vs the "Deepak Nair" who appears in all 3 sources (Bengaluru, phone `...296`) | Different cities, no phone on the source2-only record to cross-check | Correctly kept as 2 separate people — the city mismatch alone rules out a merge under the name+city fallback rule. This person (`person_id 54`) has no phone on file, so if this were real, it'd be worth flagging to the CBNexus/gig team as an "unverified — could not be cross-referenced" record |
 
+## Task 3 — audio app approach
+
+**Stack:** Streamlit (chosen over Flask for build speed), with `pydub` (backed by `ffmpeg`) for audio decoding and `numpy` for the loudness/noise math.
+
+**Both input methods, as required:** `st.audio_input()` for in-browser mic recording (always produces WAV) and `st.file_uploader()` for uploading existing files (wav/mp3/m4a/ogg/flac — `pydub`+`ffmpeg` decodes all of them uniformly, so format isn't a special case in the extraction code).
+
+**What gets auto-extracted per submission:**
+- `duration_sec`, `sample_rate_hz`/`sample_rate_khz`, `channels` — read directly from the decoded audio via `pydub`
+- `loudness_db` — reported as dBFS (decibels relative to full scale) via `pydub`'s built-in `.dBFS`. Silence produces `-inf`, which is explicitly detected and stored as `NULL` rather than a non-finite float (SQLite/JSON can't represent `-inf` cleanly)
+- `bitrate_kbps` — deliberately computed as **effective bitrate** = `(file size in bits) / duration`, not the format's nominal encoded bitrate metadata. This was a conscious tradeoff: parsing true encoder bitrate would need format-specific metadata handling (e.g. a separate library like `mutagen`) and would report inconsistently across formats, whereas effective bitrate is uniform regardless of input format. Validated this is a reasonable proxy, not just theoretically defensible — an mp3 encoded at 128kbps came back as 132.6kbps through this method, close enough to trust
+- **Bonus — noise/quality estimate:** short-time RMS energy in ~50ms frames, with the 10th percentile treated as an approximate noise floor and the 90th percentile as an approximate signal level; their ratio in dB is reported as an approximate SNR, bucketed into Clean / Some background noise / Noisy. This is a deliberately simple heuristic, not a real perceptual noise model — see stuck log entry #4 for a real bug this caught during testing
+
+**Database integration (what makes this "Task 3" and not just a standalone toy):** on submit, the entered phone number is normalized with the *same* `norm_phone()` from `scripts/common.py` that Task 1's merge pipeline uses, then looked up against `people.primary_phone`. A match links the submission to that existing `person_id`; no match creates a new person with `matched_sources='audio_app'` — a 4th source the `people` table now recognizes alongside the original 3 CSVs. Verified both paths work correctly against the real database (existing person: `Tanvi Gupta` → matched to `person_id 1`; new person: `Rakesh Kumar` → created as `person_id 56`).
+
+**Testing approach:** rather than only testing by clicking through the browser UI, the audio extraction logic (`app/audio_utils.py`) has its own test suite (`tests/test_audio_utils.py`) using synthetically generated WAV signals — a speech-shaped signal (tone bursts + silence gaps, to actually resemble real speech) at three noise levels, plus silence and format-conversion edge cases. This is what caught the bug described below before it ever reached a real recording.
+
 ## Stuck Log
 
 **These are written honestly, including where the first version of the code was wrong** — the assignment specifically says generic stuck logs score zero, so here's exactly what happened, including the part where the AI-assisted first pass had a real bug.
@@ -96,3 +123,9 @@ The root cause: the first version only compared *pairs* of raw rows when decidin
 ### 3. Deciding when the pipeline should guess vs. flag for a human
 
 Several places in this dataset don't have a definitively "correct" answer from the data alone — the ambiguous `07/03/2026`-style dates, and the Arjun Mehta identity question above. My first instinct was to just pick the more common interpretation and move on, since guessing gets a "cleaner-looking" result. I changed my mind on this after thinking about what actually happens downstream: a merge tool that's *wrong 5% of the time but never says so* is more dangerous in a real system than one that's occasionally uncertain but honest about it, because someone will build automation on top of "clean" data that silently has errors baked in. So the rule I settled on: anywhere the data is genuinely ambiguous, store both the raw value and an explicit ambiguity flag (`applied_date_ambiguous`, the unmerged Arjun Mehta records) instead of collapsing to a single confident-looking answer.
+
+### 4. The noise-estimate heuristic looked correct on paper but failed my first test case
+
+For the bonus noise/quality estimate in Task 3, my first version computed the ratio between the loudest and quietest 50ms frames of an audio clip as an approximate SNR. It looked reasonable in the code and I nearly moved on without testing it against anything. Instead I generated a synthetic clean sine tone and a noisy version of the same tone to check the numbers actually made sense — and got back an almost identical ~0dB "noisy" reading for *both*, including the clean one.
+
+The bug wasn't in the noise math — it was in my test signal. A continuous, unvarying tone has essentially the same energy in every single frame, so its 10th and 90th percentile frame-energy are nearly identical regardless of how much noise is layered on top; there's no quiet moment for the heuristic to measure a "floor" from. Real speech isn't like that — it has pauses between words, which is exactly what the heuristic needs to find a noise floor. I rejected the instinct to just tweak the percentile thresholds to "fix" the numbers on the bad test case, since that would have been curve-fitting to a test signal that wasn't representative of the actual use case (people submitting spoken voice memos) in the first place. Instead I rebuilt the test signal to be speech-shaped (tone bursts separated by real silence gaps) and re-ran — clean vs. moderate noise vs. heavy noise then came back as 60dB / 9.6dB / 2.0dB, correctly ordered. Also added an explicit near-silence guard afterward, since a genuinely silent clip was separately producing a nonsense "noisy, 0dB" reading for the same underlying reason (dividing two near-zero numbers isn't a real measurement). Both fixes are now covered by actual regression tests in `tests/test_audio_utils.py`, not just a one-off manual check.
