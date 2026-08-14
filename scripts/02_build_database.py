@@ -248,6 +248,7 @@ for group in by_phone.values():
 # if a node is compatible with two DIFFERENT clusters that themselves conflict with
 # each other, that's a genuine ambiguity - don't guess, leave unmerged and flag it.
 match_log = []  # human-readable log of interesting matches/blocks, goes into the data issues report
+fallback_merged_nodes = set()  # node_ids that were merged via Tier 3 (name+city), for accurate match_method labeling
 by_namecity = {}
 for nid in node_ids:
     n = nodes[nid]
@@ -296,6 +297,8 @@ for key, group in by_namecity.items():
             rb_name = nodes[roots[b][0]]["name"]
             if degree[a] == 1 and degree[b] == 1:
                 # unambiguous: each cluster has exactly one compatible candidate - safe to merge
+                fallback_merged_nodes.update(roots[a])
+                fallback_merged_nodes.update(roots[b])
                 uf.union(a, b)
                 match_log.append(
                     f"MERGED (fallback): '{ra_name}' cluster ({[ (nodes[m]['source'], nodes[m]['row_num']) for m in roots[a] ]}) "
@@ -361,9 +364,11 @@ for person_idx, (root, member_ids) in enumerate(clusters.items(), start=1):
         primary_phone=phones[0] if phones else None,
         primary_city=max(set(cities), key=cities.count) if cities else None,
         matched_sources=",".join(sources_hit),
-        match_method="exact_email_or_phone" if len(sources_hit) > 1 and (
-            len(set(emails)) <= 1 and len(set(phones)) <= 1
-        ) else "includes_fallback_name_city" if len(member_ids) > 1 else "single_source_only",
+        match_method=(
+            "fallback_name_city" if any(m in fallback_merged_nodes for m in member_ids)
+            else "exact_email_or_phone" if len(sources_hit) > 1
+            else "single_source_only"
+        ),
     ))
 
     for m in members:
