@@ -34,13 +34,16 @@ streamlit run app/streamlit_app.py
 
 # Task 2 - n8n automation (needs db/consultbae.db built first)
 python3 app/db_api.py              # starts the API bridge on localhost:8787, leave running
-n8n import:workflow --input=n8n/skill_tagging_workflow.json
-n8n start                          # then open the n8n editor UI and see setup steps below
+
+# IMPORTANT: If running n8n on their Cloud Free Tier, you must expose localhost to the internet.
+# Open a new terminal and run:
+cloudflared tunnel --url http://localhost:8787 
+# (Copy the generated https://...trycloudflare.com URL and update it in your n8n HTTP nodes)                        # then open the n8n editor UI and see setup steps below
 ```
 
-**Task 2 one-time setup after importing:** open the "Classify Skill Category (Claude)" node in the n8n editor → Authentication → Header Auth → create a new credential named `x-api-key` with your real Anthropic API key as the value → save. Then run the workflow from the editor (click "Execute workflow" on the Manual Trigger). `app/db_api.py` must be running in a separate terminal the whole time — n8n calls it over HTTP.
+**Task 2 one-time setup after importing: open the "Classify Skill Category (Gemini)" node in the n8n editor → Authentication → Header Auth → create a new credential named x-goog-api-key with your real Gemini API key as the value → save. Then run the workflow from the editor (click "Execute workflow" on the Manual Trigger). app/db_api.py must be running in a separate terminal the whole time — n8n calls it over HTTP.
 
-No API keys or external services needed for Tasks 1/3. Task 2 needs your own Anthropic API key (added as an n8n credential, never committed to this repo).
+No API keys or external services needed for Tasks 1/3. Task 2 needs your own Gemini API key (added as an n8n credential, never committed to this repo).
 
 The audio app needs `ffmpeg` installed on the system (already present on most Linux/Mac setups — check with `ffmpeg -version`; on Streamlit Cloud, `packages.txt` in this repo handles it automatically).
 
@@ -123,11 +126,11 @@ Result: 102 raw rows → **55 unique people**, with full row-level lineage kept 
 
 ## Task 2 — n8n automation approach
 
-**What it does:** an n8n workflow (`n8n/skill_tagging_workflow.json`) that reads every person in the database who has skills data but no `skill_category` yet, sends their skills to Claude for classification into one of `automation-heavy` / `web dev` / `data` / `voice/calling` / `other`, and writes the result back — end to end, no manual step in between.
+**What it does:** an n8n workflow (n8n/skill_tagging_workflow.json) that reads every person in the database who has skills data but no skill_category yet, sends their skills to Gemini 3.5 Flash-Lite for classification, and writes the result back — end to end.
 
 **Why an API bridge instead of a direct DB connection:** confirmed via research before building anything — n8n has **no built-in SQLite node** (there's an open community forum thread asking why not, still unanswered). The only options are unofficial community node packages that would need separate installation on whoever's n8n instance runs this, which is fragile for a reviewer who just wants to open this and have it work. Built a tiny Flask API (`app/db_api.py`) instead, and n8n talks to it with its core HTTP Request node — zero extra n8n setup required, and honestly this is also just how this would actually be built for a real client integration (no-code tools talk to backends over HTTP in practice, not by reaching into a database file directly).
 
-**Workflow structure:** Manual Trigger → `GET /api/people/untagged` → (n8n auto-splits the JSON array response into one item per person — verified empirically, no separate Split Out node needed) → `POST` to Claude for classification → Code node parses/validates the response → `POST /api/people/{id}/tag` writes it back.
+**Workflow structure:** Manual Trigger → GET /api/people/untagged → POST to Gemini for classification → Code node parses/validates the response → POST /api/people/{id}/tag writes it back.
 
 **Verification approach:** rather than hand-author the JSON and assume it's correct, I actually installed n8n locally, imported this exact workflow via its CLI, and ran it end-to-end against the real merged database — first with a local mock standing in for the Claude API call (to validate the wiring without spending real API credits), confirming all 55 people got correctly tagged with a sensible category distribution before ever touching the real Anthropic endpoint. This caught a real, non-obvious bug — see stuck log entry #6.
 
@@ -205,3 +208,12 @@ The broader lesson I took from this, worth stating plainly: **a tool reporting s
 `db/consultbae.db` is a generated build artifact — deliberately not committed to git, since it's regenerated from the raw CSVs by `scripts/02_build_database.py`. That's a reasonable call for local development. It's a bad call for deployment, and I didn't catch it until after actually deploying: Streamlit Cloud clones the repo fresh, so it has the CSVs but not the pre-built database, and the app's original startup check just showed an error message telling the person to go run a script manually — which isn't something a live public demo can do for itself.
 
 What made this one different from the earlier bugs: I didn't catch it through testing at all. I'd verified the app booted cleanly (HTTP 200, no import errors) back when I first built it — but that check used a database that already existed locally, so it never exercised the missing-database code path in the first place. The gap only became visible once the app was actually deployed and hit fresh, by an actual visitor to the URL — not by me. I asked Claude to fix it, and rather than just patch the error message to be more helpful, changed the app to auto-build the database on first run if it's missing, using the same two scripts (`02_build_database.py`, `03_add_skill_category_column.py`) already documented as the manual setup steps — so a fresh deploy self-initializes instead of dead-ending. Verified the exact subprocess calls work correctly in isolation (55 people, correct schema) before trusting it, since a naive `curl` test against the running app turned out to be a false-positive check in its own right — hitting the app's URL with `curl` only fetches Streamlit's static HTML shell, not a real session, so it never actually exercises the Python script at all. Worth remembering for next time: a passing smoke test on a Streamlit app doesn't mean the app's Python logic ran.
+
+### 8. The n8n Cloud Workflow couldn't reach my local database (Tunnel Issue)
+When running the workflow on n8n's Cloud Free Tier, the HTTP node targeting `http://localhost:8787/api/people/untagged` failed immediately. n8n's cloud servers obviously cannot route to my local machine's `localhost`. I didn't want to deploy the Flask app to a live server just for a test run, so the fix was establishing a secure tunnel. I used Cloudflare Quick Tunnels (`cloudflared tunnel --url http://localhost:8787`) to generate a public HTTPS URL that securely bridged the n8n cloud requests directly to my local SQLite database.
+
+### 9. LLM Formatting caused every single candidate to be tagged as "other"
+After successfully wiring Gemini 3.5 Flash-Lite into the workflow, I checked the database and found that all 55 candidates had been tagged as `"other"`. There were two root causes: First, the API payload was evaluating `{{$json.skills}}` as undefined because the actual key coming from my Flask API was `skills_text`. Second, Gemini was returning conversational preamble (e.g., "Category: web dev") which my exact-match Code node rejected. I fixed this by anchoring the LLM with a strict few-shot prompt, passing the correct `skills_text` key, and writing a much more resilient Javascript parser in the Code node that falls back to keyword matching if the LLM output is malformed.
+
+### 10. Hitting the Gemini Free-Tier Rate Limit instantly
+The moment I fixed the parsing bug and ran the workflow, it crashed with a 429 Quota Exceeded error (`limit: 15 RPM`). The n8n HTTP node was attempting to fire all 55 classification requests to the Gemini API concurrently. The fix didn't require changing any code—I simply opened the HTTP node's settings, enabled **Batching** (Batch Size: 1, Interval: 6000ms), and turned on **Retry On Fail**. This paced the requests to 10 per minute, successfully processing all 55 rows slowly but reliably without ever tripping Google's rate limiter.
