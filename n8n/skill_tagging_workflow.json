@@ -1,95 +1,103 @@
 {
-  "id": "skilltag1",
-  "name": "ConsultBae - Skill Category Auto-Tagging",
-  "active": false,
-  "settings": {},
+  "name": "Task 2: Skill Tagging Workflow (Gemini API)",
   "nodes": [
     {
       "parameters": {},
-      "id": "trigger1",
-      "name": "Manual Trigger",
+      "id": "23c280f9-a034-453d-88f5-30058e578c74",
+      "name": "When clicking 'Test Workflow'",
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
       "position": [0, 0]
     },
     {
       "parameters": {
-        "method": "GET",
-        "url": "http://localhost:8787/api/people/untagged",
+        "url": "https://tokyo-density-detail-compile.trycloudflare.com/api/people/untagged",
         "options": {}
       },
-      "id": "http1",
-      "name": "Get Untagged People",
+      "id": "e93290b3-f0ed-46af-a6ff-905c1973ff55",
+      "name": "Fetch Untagged People",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [220, 0],
-      "notes": "Hits the Flask API bridge (app/db_api.py) - must be running on localhost:8787. n8n has no built-in SQLite node, this is the portable alternative. Response is a JSON array; n8n auto-splits it into one item per person (verified empirically, no Split Out node needed)."
+      "typeVersion": 4.1,
+      "position": [200, 0]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "https://api.anthropic.com/v1/messages",
-        "authentication": "genericCredentialType",
-        "genericAuthType": "httpHeaderAuth",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {"name": "anthropic-version", "value": "2023-06-01"},
-            {"name": "content-type", "value": "application/json"}
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
           ]
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: \"claude-sonnet-4-6\", max_tokens: 20, system: \"You classify a person's skill set into exactly one category: automation-heavy, web dev, data, voice/calling, or other. Respond with ONLY the category label, nothing else - no punctuation, no explanation.\", messages: [{ role: \"user\", content: \"Skills: \" + $json.skills_text }] }) }}",
-        "options": {}
+        "jsonBody": "={\n  \"contents\": [{\n    \"parts\": [{\n      \"text\": \"Classify the candidate skills into EXACTLY ONE of these 5 categories:\\n- automation-heavy\\n- web dev\\n- data\\n- voice/calling\\n- other\\n\\nExamples:\\n- 'React, TypeScript, CSS, Node, Fullstack, Frontend, Backend, Django, AWS' -> web dev\\n- 'Python, SQL, Tableau, Pandas, Analytics, PowerBI, Excel' -> data\\n- 'Zapier, Make, n8n, RPA, Selenium, Automation, Bash' -> automation-heavy\\n- 'Telemarketing, Telesales, Cold calling, Customer support, BPO, Voice agent' -> voice/calling\\n- 'Unknown, generic, or non-technical unlisted skills' -> other\\n\\nCandidate Skills: {{$json.skills_text}}\\n\\nRules: Output ONLY one of the exact 5 category strings above in lowercase. No quotes, no markdown, no explanation.\"\n    }]\n  }]\n}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 6000
+            }
+          },
+          "retryOnFail": true,
+          "maxTries": 3,
+          "waitBetweenTries": 10000
+        }
       },
-      "id": "http2",
-      "name": "Classify Skill Category (Claude)",
+      "id": "4a0c8b6d-74d3-4fc2-a391-7f99992a5431",
+      "name": "Classify Skill Category (Gemini)",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [440, 0],
-      "notes": "REQUIRES SETUP: after importing, open this node -> Authentication -> Header Auth -> create a new credential named 'x-api-key' with your real Anthropic API key as the value. See README for exact steps."
+      "typeVersion": 4.1,
+      "position": [400, 0]
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const category = ($input.item.json.content[0].text || '').trim().toLowerCase();\nconst allowed = ['automation-heavy', 'web dev', 'data', 'voice/calling', 'other'];\nreturn {\n  json: {\n    person_id: $('Get Untagged People').item.json.person_id,\n    canonical_name: $('Get Untagged People').item.json.canonical_name,\n    skill_category: allowed.includes(category) ? category : 'other'\n  }\n};"
+        "jsCode": "const originalPerson = $('Fetch Untagged People').item.json;\nconst personId = originalPerson.person_id || originalPerson.id;\nconst rawSkills = String(originalPerson.skills_text || originalPerson.skills || '').toLowerCase();\n\nconst geminiPart = $input.item.json?.candidates?.[0]?.content?.parts?.[0]?.text || '';\nconst cleanGemini = String(geminiPart).toLowerCase().replace(/[^a-z0-9\\-\\/ ]/g, ' ').replace(/\\s+/g, ' ').trim();\n\nconst allowedCategories = ['automation-heavy', 'web dev', 'data', 'voice/calling', 'other'];\nlet finalCategory = 'other';\n\n// 1. Direct match with valid 5 categories\nfor (const cat of allowedCategories) {\n  if (cleanGemini === cat || cleanGemini.includes(cat)) {\n    finalCategory = cat;\n    break;\n  }\n}\n\n// 2. Fallback keyword mapping to strictly one of the 5 allowed categories\nif (finalCategory === 'other') {\n  if (/n8n|zapier|make|rpa|selenium|uipath|scripting|automation|playwright/i.test(cleanGemini) || /n8n|zapier|make|rpa|selenium|uipath|scripting|automation|playwright/i.test(rawSkills)) {\n    finalCategory = 'automation-heavy';\n  } else if (/react|node|html|css|django|flask|vue|angular|frontend|backend|fullstack|javascript|typescript|express|laravel|php|ruby|cloud|devops|aws|docker|kubernetes|flutter|mobile/i.test(cleanGemini) || /react|node|html|css|django|flask|vue|angular|frontend|backend|fullstack|javascript|typescript|express|laravel|php|ruby|cloud|devops|aws|docker|kubernetes|flutter|mobile/i.test(rawSkills)) {\n    finalCategory = 'web dev';\n  } else if (/sql|pandas|analytics|tableau|powerbi|bi|etl|machine learning|data science|postgresql|mysql|data|excel/i.test(cleanGemini) || /sql|pandas|analytics|tableau|powerbi|bi|etl|machine learning|data science|postgresql|mysql|data|excel/i.test(rawSkills)) {\n    finalCategory = 'data';\n  } else if (/telemarketing|telesales|cold call|calling|voice|bpo|customer support|support/i.test(cleanGemini) || /telemarketing|telesales|cold call|calling|voice|bpo|customer support|support/i.test(rawSkills)) {\n    finalCategory = 'voice/calling';\n  }\n}\n\n// Extra sanity check\nif (!allowedCategories.includes(finalCategory)) {\n  finalCategory = 'other';\n}\n\nreturn {\n  json: {\n    person_id: personId,\n    category: finalCategory\n  }\n};"
       },
-      "id": "code1",
-      "name": "Parse & Validate Category",
+      "id": "1bc789df-1d2a-463d-82d1-21808b8b0e79",
+      "name": "Extract & Validate Category",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [660, 0],
-      "notes": "mode is explicitly 'runOnceForEachItem' - the default mode ('runOnceForAllItems') silently drops every item except the first when the code returns a single object instead of an array. Caught this during testing: only 1/55 people got tagged before this fix. See stuck log."
+      "position": [600, 0]
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "=http://localhost:8787/api/people/{{ $json.person_id }}/tag",
+        "url": "=https://tokyo-density-detail-compile.trycloudflare.com/api/people/{{$json.person_id}}/tag",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ skill_category: $json.skill_category }) }}",
+        "jsonBody": "={\n  \"skill_category\": \"{{$json.category}}\"\n}",
         "options": {}
       },
-      "id": "http3",
-      "name": "Write Back Tag",
+      "id": "90dbd1f4-90a7-47ab-8f92-9a008c26bd9d",
+      "name": "Update Database",
       "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [880, 0]
+      "typeVersion": 4.1,
+      "position": [800, 0]
     }
   ],
   "connections": {
-    "Manual Trigger": {
-      "main": [[{"node": "Get Untagged People", "type": "main", "index": 0}]]
+    "When clicking 'Test Workflow'": {
+      "main": [[{"node": "Fetch Untagged People", "type": "main", "index": 0}]]
     },
-    "Get Untagged People": {
-      "main": [[{"node": "Classify Skill Category (Claude)", "type": "main", "index": 0}]]
+    "Fetch Untagged People": {
+      "main": [[{"node": "Classify Skill Category (Gemini)", "type": "main", "index": 0}]]
     },
-    "Classify Skill Category (Claude)": {
-      "main": [[{"node": "Parse & Validate Category", "type": "main", "index": 0}]]
+    "Classify Skill Category (Gemini)": {
+      "main": [[{"node": "Extract & Validate Category", "type": "main", "index": 0}]]
     },
-    "Parse & Validate Category": {
-      "main": [[{"node": "Write Back Tag", "type": "main", "index": 0}]]
+    "Extract & Validate Category": {
+      "main": [[{"node": "Update Database", "type": "main", "index": 0}]]
     }
+  },
+  "settings": {
+    "executionOrder": "v1"
   }
 }
